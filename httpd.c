@@ -66,6 +66,7 @@ void accept_request(void *arg)
                        * program */
     char *query_string = NULL;
 
+    // getline
     numchars = get_line(client, buf, sizeof(buf));
     i = 0; j = 0;
     while (!ISspace(buf[i]) && (i < sizeof(method) - 1))
@@ -76,12 +77,13 @@ void accept_request(void *arg)
     j=i;
     method[i] = '\0';
 
+    // cmp 都不是 0
     if (strcasecmp(method, "GET") && strcasecmp(method, "POST"))
     {
         unimplemented(client);
         return;
     }
-
+    // 是 POST 方法，转发到 CGI
     if (strcasecmp(method, "POST") == 0)
         cgi = 1;
 
@@ -159,6 +161,7 @@ void bad_request(int client)
  * easier just to do something like pipe, fork, and exec("cat").
  * Parameters: the client socket descriptor
  *             FILE pointer for the file to cat */
+// 我觉得可以用 zero-sized copy 优化
 /**********************************************************************/
 void cat(int client, FILE *resource)
 {
@@ -310,6 +313,8 @@ void execute_cgi(int client, const char *path,
  *             the buffer to save the data in
  *             the size of the buffer
  * Returns: the number of bytes stored (excluding null) */
+// socket 的 LINE 消息端是 CRLF 结尾
+//
 /**********************************************************************/
 int get_line(int sock, char *buf, int size)
 {
@@ -319,6 +324,7 @@ int get_line(int sock, char *buf, int size)
 
     while ((i < size - 1) && (c != '\n'))
     {
+        // 看来是类似 read n
         n = recv(sock, &c, 1, 0);
         /* DEBUG printf("%02X\n", c); */
         if (n > 0)
@@ -432,26 +438,35 @@ int startup(u_short *port)
     int on = 1;
     struct sockaddr_in name;
 
+    // Ipv4, tcp
     httpd = socket(PF_INET, SOCK_STREAM, 0);
     if (httpd == -1)
         error_die("socket");
+    // 设置一些初始化信息
     memset(&name, 0, sizeof(name));
     name.sin_family = AF_INET;
     name.sin_port = htons(*port);
     name.sin_addr.s_addr = htonl(INADDR_ANY);
+    // 这里是 sock 的一些属性设置
+    // SOL_SOCKET 和 SO_REUSEADDR 是 Time-wait 有关的，在 time-wait 的时候仍然能处理
+    // < 0 是处理失败了
     if ((setsockopt(httpd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on))) < 0)  
     {  
         error_die("setsockopt failed");
     }
+    // bind 在这个地址出问题
     if (bind(httpd, (struct sockaddr *)&name, sizeof(name)) < 0)
         error_die("bind");
     if (*port == 0)  /* if dynamically allocating a port */
     {
         socklen_t namelen = sizeof(name);
+        // 我好像没写过这个
+        // 应该是没有绑定 PORT 的时候写到这个上面
         if (getsockname(httpd, (struct sockaddr *)&name, &namelen) == -1)
             error_die("getsockname");
         *port = ntohs(name.sin_port);
     }
+    // listen == 5, 返回这个
     if (listen(httpd, 5) < 0)
         error_die("listen");
     return(httpd);
@@ -489,17 +504,24 @@ void unimplemented(int client)
 int main(void)
 {
     int server_sock = -1;
+    // 端口选择
     u_short port = 4000;
+    // client_sock 处理客户端请求
     int client_sock = -1;
+    // sockaddr_in 是客户端的结构
     struct sockaddr_in client_name;
+    // sock_len
     socklen_t  client_name_len = sizeof(client_name);
+    // 新线程
     pthread_t newthread;
+
 
     server_sock = startup(&port);
     printf("httpd running on port %d\n", port);
 
     while (1)
     {
+        // 接受请求
         client_sock = accept(server_sock,
                 (struct sockaddr *)&client_name,
                 &client_name_len);
