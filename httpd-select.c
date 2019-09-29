@@ -24,6 +24,7 @@
 #include <sys/stat.h>
 #include <pthread.h>
 #include <sys/wait.h>
+#include <sys/select.h>
 #include <stdlib.h>
 #include <stdint.h>
 
