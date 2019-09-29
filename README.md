@@ -1,3 +1,13 @@
+# Tinyhttpd非官方镜像
+
+* httpd.c 是原本的服务器文件，我在这里加了很多奇怪的、伤害代码风格的测试
+* httpd-select.c 是用 select 实现的
+* locust.py 是基本的压力测试代码，考虑 cmake 编译 release 版本后运行 `locust -f locust.py --host=http://127.0.0.1:4000` 测试
+
+目前测试情况：
+* httpd.c 似乎还好，select 表现没有怎么优于它，我去请教大佬好了...
+
+## 以下是镜像原来的 readme
 A mirror for tinyhttpd(Tinyhttpd非官方镜像,Fork自[sourceForge](https://sourceforge.net/projects/tiny-httpd/),仅供学习)
 
 测试CGI时需要本机安装PERL，同时安装perl-cgi
