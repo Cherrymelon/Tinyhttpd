@@ -21,5 +21,7 @@ message(STATUS "C flags, minimal Release configuration: ${CMAKE_C_FLAGS_MINSIZER
 #add_executable(client clients/simpleclient.c)
 add_executable(httpd httpd.c)
 add_executable(httpd-select httpd-select.c)
+add_executable(httpd-fork httpd-fork.c)
 
 add_subdirectory(clients)
+add_subdirectory(samples)
