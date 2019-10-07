@@ -18,6 +18,8 @@ message(STATUS "C flags, Release configuration: ${CMAKE_C_FLAGS_RELEASE}")
 message(STATUS "C flags, Release configuration with Debug info: ${CMAKE_C_FLAGS_RELWITHDEBINFO}")
 message(STATUS "C flags, minimal Release configuration: ${CMAKE_C_FLAGS_MINSIZEREL}")
 
-add_executable(client simpleclient.c)
+#add_executable(client clients/simpleclient.c)
 add_executable(httpd httpd.c)
 add_executable(httpd-select httpd-select.c)
+
+add_subdirectory(clients)
