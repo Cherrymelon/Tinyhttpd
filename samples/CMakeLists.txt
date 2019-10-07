@@ -11,5 +11,11 @@ add_executable(libevent-demo libevent-demo.c)
 
 target_link_libraries(libevent-demo ${LIBEVENT2_CORE})
 
-add_custom_target(format
-        COMMAND clang-format --style=file -i ${ALL_SOURCE_FILES} )
+add_executable(libevent-bufevent-demo libevent_bufferevent_demo.c)
+target_link_libraries(libevent-bufevent-demo ${LIBEVENT2_CORE})
+
+add_executable(libevent-evbuffer-demo libevent_evbuffer_demo.c)
+target_link_libraries(libevent-evbuffer-demo ${LIBEVENT2_CORE})
+
+#add_custom_target(format
+#        COMMAND clang-format --style=file -i ${ALL_SOURCE_FILES} )
