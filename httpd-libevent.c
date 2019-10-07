@@ -15,6 +15,10 @@
  *  3) Comment out the two lines that run pthread_create().
  *  4) Uncomment the line that runs accept_request().
  *  5) Remove -lsocket from the Makefile.
+ *
+ *  Libevent 参考的代码如下：
+ *  https://johng.cn/linux-c-libevent/
+ *  https://sambeauwang.github.io/2017/02/25/libevent%E5%85%A5%E9%97%A8/
  */
 #include <stdio.h>
 #include <sys/socket.h>
@@ -44,127 +48,51 @@
 #define STDERR  2
 
 void accept_request(void *);
-void bad_request(int);
-void cat(int, FILE *);
+void bad_request(struct bufferevent *bev);
+void cat(struct bufferevent*, FILE *);
 void cannot_execute(int);
 void error_die(const char *);
 void execute_cgi(int, const char *, const char *, const char *);
 int get_line(int, char *, int);
-void headers(int, const char *);
-void not_found(int);
-void serve_file(int, const char *);
+void headers(struct bufferevent *, const char *);
+void not_found(struct bufferevent*);
+void serve_file(struct bufferevent *, const char *);
 int startup(u_short *);
-void unimplemented(int);
+void unimplemented(struct bufferevent *);
 void do_accept(evutil_socket_t fd, short event, void *arg);
 void read_cb(struct bufferevent *bev, void *arg);
 void error_cb(struct bufferevent *bev, short event, void *arg);
 
-/**********************************************************************/
-/* A request has caused a call to accept() on the server port to
- * return.  Process the request appropriately.
- * Parameters: the socket connected to the client */
-/**********************************************************************/
-void accept_request(void *arg)
-{
-    int client = (intptr_t)arg;
-    char buf[1024];
-    size_t numchars;
-    char method[255];
-    char url[255];
-    char path[512];
-    size_t i, j;
-    struct stat st;
-    int cgi = 0;      /* becomes true if server decides this is a CGI
-                       * program */
-    char *query_string = NULL;
+void write_cb(struct bufferevent *bev, void *arg) {}
 
-    // getline
-    numchars = get_line(client, buf, sizeof(buf));
-    i = 0; j = 0;
-    while (!ISspace(buf[i]) && (i < sizeof(method) - 1))
-    {
-        method[i] = buf[i];
-        i++;
-    }
-    j=i;
-    method[i] = '\0';
+enum HttpState {
+    // 拿到基本的 method
+    Method,
+    // 需要 discard header
+    DiscardHeader,
+};
 
-    // cmp 都不是 0
-    if (strcasecmp(method, "GET") && strcasecmp(method, "POST"))
-    {
-        unimplemented(client);
-        return;
-    }
-    // 是 POST 方法，转发到 CGI
-    if (strcasecmp(method, "POST") == 0)
-        cgi = 1;
-
-    i = 0;
-    while (ISspace(buf[j]) && (j < numchars))
-        j++;
-    while (!ISspace(buf[j]) && (i < sizeof(url) - 1) && (j < numchars))
-    {
-        url[i] = buf[j];
-        i++; j++;
-    }
-    url[i] = '\0';
-
-    if (strcasecmp(method, "GET") == 0)
-    {
-        query_string = url;
-        while ((*query_string != '?') && (*query_string != '\0'))
-            query_string++;
-        if (*query_string == '?')
-        {
-            cgi = 1;
-            *query_string = '\0';
-            query_string++;
-        }
-    }
-
-    sprintf(path, "htdocs%s", url);
-    if (path[strlen(path) - 1] == '/')
-        strcat(path, "index.html");
-    if (stat(path, &st) == -1) {
-        while ((numchars > 0) && strcmp("\n", buf))  /* read & discard headers */
-            numchars = get_line(client, buf, sizeof(buf));
-        not_found(client);
-    }
-    else
-    {
-        if ((st.st_mode & S_IFMT) == S_IFDIR)
-            strcat(path, "/index.html");
-        if ((st.st_mode & S_IXUSR) ||
-            (st.st_mode & S_IXGRP) ||
-            (st.st_mode & S_IXOTH)    )
-            cgi = 1;
-        if (!cgi)
-            serve_file(client, path);
-        else
-            execute_cgi(client, path, method, query_string);
-    }
-
-    close(client);
-}
 
 /**********************************************************************/
 /* Inform the client that a request it has made has a problem.
  * Parameters: client socket */
 /**********************************************************************/
-void bad_request(int client)
+void bad_request(struct bufferevent* bev)
 {
     char buf[1024];
 
     sprintf(buf, "HTTP/1.0 400 BAD REQUEST\r\n");
-    send(client, buf, sizeof(buf), 0);
+    bufferevent_write(bev, buf, strlen(buf));
     sprintf(buf, "Content-type: text/html\r\n");
-    send(client, buf, sizeof(buf), 0);
+    bufferevent_write(bev, buf, strlen(buf));
     sprintf(buf, "\r\n");
-    send(client, buf, sizeof(buf), 0);
+    bufferevent_write(bev, buf, strlen(buf));
     sprintf(buf, "<P>Your browser sent a bad request, ");
-    send(client, buf, sizeof(buf), 0);
+    bufferevent_write(bev, buf, strlen(buf));
     sprintf(buf, "such as a POST without a Content-Length.\r\n");
-    send(client, buf, sizeof(buf), 0);
+    bufferevent_write(bev, buf, strlen(buf));
+
+//    bufferevent_free(bev);
 }
 
 /**********************************************************************/
@@ -175,14 +103,14 @@ void bad_request(int client)
  *             FILE pointer for the file to cat */
 // 我觉得可以用 zero-sized copy 优化
 /**********************************************************************/
-void cat(int client, FILE *resource)
+void cat(struct bufferevent* bev, FILE *resource)
 {
     char buf[1024];
 
     fgets(buf, sizeof(buf), resource);
     while (!feof(resource))
     {
-        send(client, buf, strlen(buf), 0);
+        bufferevent_write(bev, buf, strlen(buf));
         fgets(buf, sizeof(buf), resource);
     }
 }
@@ -226,92 +154,6 @@ void error_die(const char *sc)
 void execute_cgi(int client, const char *path,
                  const char *method, const char *query_string)
 {
-    char buf[1024];
-    int cgi_output[2];
-    int cgi_input[2];
-    pid_t pid;
-    int status;
-    int i;
-    char c;
-    int numchars = 1;
-    int content_length = -1;
-
-    buf[0] = 'A'; buf[1] = '\0';
-    if (strcasecmp(method, "GET") == 0)
-        while ((numchars > 0) && strcmp("\n", buf))  /* read & discard headers */
-            numchars = get_line(client, buf, sizeof(buf));
-    else if (strcasecmp(method, "POST") == 0) /*POST*/
-    {
-        numchars = get_line(client, buf, sizeof(buf));
-        while ((numchars > 0) && strcmp("\n", buf))
-        {
-            buf[15] = '\0';
-            if (strcasecmp(buf, "Content-Length:") == 0)
-                content_length = atoi(&(buf[16]));
-            numchars = get_line(client, buf, sizeof(buf));
-        }
-        if (content_length == -1) {
-            bad_request(client);
-            return;
-        }
-    }
-    else/*HEAD or other*/
-    {
-    }
-
-
-    if (pipe(cgi_output) < 0) {
-        cannot_execute(client);
-        return;
-    }
-    if (pipe(cgi_input) < 0) {
-        cannot_execute(client);
-        return;
-    }
-
-    if ( (pid = fork()) < 0 ) {
-        cannot_execute(client);
-        return;
-    }
-    sprintf(buf, "HTTP/1.0 200 OK\r\n");
-    send(client, buf, strlen(buf), 0);
-    if (pid == 0)  /* child: CGI script */
-    {
-        char meth_env[255];
-        char query_env[255];
-        char length_env[255];
-
-        dup2(cgi_output[1], STDOUT);
-        dup2(cgi_input[0], STDIN);
-        close(cgi_output[0]);
-        close(cgi_input[1]);
-        sprintf(meth_env, "REQUEST_METHOD=%s", method);
-        putenv(meth_env);
-        if (strcasecmp(method, "GET") == 0) {
-            sprintf(query_env, "QUERY_STRING=%s", query_string);
-            putenv(query_env);
-        }
-        else {   /* POST */
-            sprintf(length_env, "CONTENT_LENGTH=%d", content_length);
-            putenv(length_env);
-        }
-        execl(path, NULL);
-        exit(0);
-    } else {    /* parent */
-        close(cgi_output[1]);
-        close(cgi_input[0]);
-        if (strcasecmp(method, "POST") == 0)
-            for (i = 0; i < content_length; i++) {
-                recv(client, &c, 1, 0);
-                write(cgi_input[1], &c, 1);
-            }
-        while (read(cgi_output[0], &c, 1) > 0)
-            send(client, &c, 1, 0);
-
-        close(cgi_output[0]);
-        close(cgi_input[1]);
-        waitpid(pid, &status, 0);
-    }
 }
 
 /**********************************************************************/
@@ -362,51 +204,76 @@ int get_line(int sock, char *buf, int size)
     return(i);
 }
 
+//void event_callback(struct bufferevent *bev, short events, void *ctx)
+//{
+//    struct info *inf = ctx;
+//    struct evbuffer *input = bufferevent_get_input(bev);
+//    int finished = 0;
+//
+//    if (events & BEV_EVENT_EOF) {
+//        size_t len = evbuffer_get_length(input);
+//        printf("Got a close from %s.  We drained %lu bytes from it, "
+//               "and have %lu left.\n", inf->name,
+//               (unsigned long)inf->total_drained, (unsigned long)len);
+//        finished = 1;
+//    }
+//    if (events & BEV_EVENT_ERROR) {
+//        printf("Got an error from %s: %s\n",
+//               inf->name, evutil_socket_error_to_string(EVUTIL_SOCKET_ERROR()));
+//        finished = 1;
+//    }
+//    if (finished) {
+//        free(ctx);
+//        bufferevent_free(bev);
+//    }
+//}
+
 /**********************************************************************/
 /* Return the informational HTTP headers about a file. */
 /* Parameters: the socket to print the headers on
  *             the name of the file */
 /**********************************************************************/
-void headers(int client, const char *filename)
+void headers(struct bufferevent* bev, const char *filename)
 {
     char buf[1024];
     (void)filename;  /* could use filename to determine file type */
 
     strcpy(buf, "HTTP/1.0 200 OK\r\n");
-    send(client, buf, strlen(buf), 0);
+    bufferevent_write(bev, buf, strlen(buf));
     strcpy(buf, SERVER_STRING);
-    send(client, buf, strlen(buf), 0);
+    bufferevent_write(bev, buf, strlen(buf));
     sprintf(buf, "Content-Type: text/html\r\n");
-    send(client, buf, strlen(buf), 0);
+    bufferevent_write(bev, buf, strlen(buf));
     strcpy(buf, "\r\n");
-    send(client, buf, strlen(buf), 0);
+    bufferevent_write(bev, buf, strlen(buf));
 }
 
 /**********************************************************************/
 /* Give a client a 404 not found status message. */
 /**********************************************************************/
-void not_found(int client)
+void not_found(struct bufferevent* bev)
 {
     char buf[1024];
 
     sprintf(buf, "HTTP/1.0 404 NOT FOUND\r\n");
-    send(client, buf, strlen(buf), 0);
+    bufferevent_write(bev, buf, strlen(buf));
     sprintf(buf, SERVER_STRING);
-    send(client, buf, strlen(buf), 0);
+    bufferevent_write(bev, buf, strlen(buf));
     sprintf(buf, "Content-Type: text/html\r\n");
-    send(client, buf, strlen(buf), 0);
+    bufferevent_write(bev, buf, strlen(buf));
     sprintf(buf, "\r\n");
-    send(client, buf, strlen(buf), 0);
+    bufferevent_write(bev, buf, strlen(buf));
     sprintf(buf, "<HTML><TITLE>Not Found</TITLE>\r\n");
-    send(client, buf, strlen(buf), 0);
+    bufferevent_write(bev, buf, strlen(buf));
     sprintf(buf, "<BODY><P>The server could not fulfill\r\n");
-    send(client, buf, strlen(buf), 0);
+    bufferevent_write(bev, buf, strlen(buf));
     sprintf(buf, "your request because the resource specified\r\n");
-    send(client, buf, strlen(buf), 0);
+    bufferevent_write(bev, buf, strlen(buf));
     sprintf(buf, "is unavailable or nonexistent.\r\n");
-    send(client, buf, strlen(buf), 0);
+    bufferevent_write(bev, buf, strlen(buf));
     sprintf(buf, "</BODY></HTML>\r\n");
-    send(client, buf, strlen(buf), 0);
+    bufferevent_write(bev, buf, strlen(buf));
+//    bufferevent_free(bev);
 }
 
 /**********************************************************************/
@@ -416,23 +283,27 @@ void not_found(int client)
  *              file descriptor
  *             the name of the file to serve */
 /**********************************************************************/
-void serve_file(int client, const char *filename)
+void serve_file(struct bufferevent *bev, const char *filename)
 {
     FILE *resource = NULL;
-    int numchars = 1;
+//    int numchars = 1;
     char buf[1024];
 
     buf[0] = 'A'; buf[1] = '\0';
-    while ((numchars > 0) && strcmp("\n", buf))  /* read & discard headers */
-        numchars = get_line(client, buf, sizeof(buf));
+//    while ((numchars > 0) && strcmp("\n", buf)) {
+//        // TODO: implement it here
+//        unimplemented(bev);
+//        /* read & discard headers */
+//        numchars = get_line(client, buf, sizeof(buf));
+//    }
 
     resource = fopen(filename, "r");
     if (resource == NULL)
-        not_found(client);
+        not_found(bev);
     else
     {
-        headers(client, filename);
-        cat(client, resource);
+        headers(bev, filename);
+        cat(bev, resource);
     }
     fclose(resource);
 }
@@ -492,26 +363,25 @@ int startup(u_short *port)
  * implemented.
  * Parameter: the client socket */
 /**********************************************************************/
-void unimplemented(int client)
+void unimplemented(struct bufferevent *bev)
 {
     char buf[1024];
-
     sprintf(buf, "HTTP/1.0 501 Method Not Implemented\r\n");
-    send(client, buf, strlen(buf), 0);
+    bufferevent_write(bev, buf, strlen(buf));
     sprintf(buf, SERVER_STRING);
-    send(client, buf, strlen(buf), 0);
+    bufferevent_write(bev, buf, strlen(buf));
     sprintf(buf, "Content-Type: text/html\r\n");
-    send(client, buf, strlen(buf), 0);
+    bufferevent_write(bev, buf, strlen(buf));
     sprintf(buf, "\r\n");
-    send(client, buf, strlen(buf), 0);
+    bufferevent_write(bev, buf, strlen(buf));
     sprintf(buf, "<HTML><HEAD><TITLE>Method Not Implemented\r\n");
-    send(client, buf, strlen(buf), 0);
+    bufferevent_write(bev, buf, strlen(buf));
     sprintf(buf, "</TITLE></HEAD>\r\n");
-    send(client, buf, strlen(buf), 0);
+    bufferevent_write(bev, buf, strlen(buf));
     sprintf(buf, "<BODY><P>HTTP request method not supported.\r\n");
-    send(client, buf, strlen(buf), 0);
+    bufferevent_write(bev, buf, strlen(buf));
     sprintf(buf, "</BODY></HTML>\r\n");
-    send(client, buf, strlen(buf), 0);
+    bufferevent_write(bev, buf, strlen(buf));
 }
 
 /**********************************************************************/
@@ -578,22 +448,10 @@ void do_accept(evutil_socket_t server_sock, short event, void *arg) {
     //类型转换
     struct event_base *base_ev = (struct event_base *) arg;
 
-    //socket发送欢迎信息
-//    char * msg = "Welcome to My socket";
-//    int size = send(client_sock, msg, strlen(msg), 0);
-
-    //创建一个事件，这个事件主要用于监听和读取客户端传递过来的数据
-    //持久类型，并且将base_ev传递到do_read回调函数中去
-    //struct event *ev;
-    //ev = event_new(base_ev, client_socketfd, EV_TIMEOUT|EV_READ|EV_PERSIST, do_read, base_ev);
-    //event_add(ev, NULL);
-
-    //创建一个evbuffer，用来缓冲客户端传递过来的数据
-    struct evbuffer *buf = evbuffer_new();
     //创建一个bufferevent
     struct bufferevent *bev = bufferevent_socket_new(base_ev, client_sock, BEV_OPT_CLOSE_ON_FREE);
     //设置读取方法和error时候的方法，将buf缓冲区当参数传递
-    bufferevent_setcb(bev, read_cb, NULL, error_cb, buf);
+    bufferevent_setcb(bev, read_cb, write_cb, error_cb, NULL);
     //设置类型
     bufferevent_enable(bev, EV_READ|EV_WRITE|EV_PERSIST);
     //设置水位
@@ -603,6 +461,7 @@ void do_accept(evutil_socket_t server_sock, short event, void *arg) {
 #define MAX_LINE    256
 
 void error_cb(struct bufferevent *bev, short event, void *arg) {
+    printf("error_cb called\n");
     evutil_socket_t fd = bufferevent_getfd(bev);
     printf("fd = %u, ", fd);
     if (event & BEV_EVENT_TIMEOUT) {
@@ -615,8 +474,99 @@ void error_cb(struct bufferevent *bev, short event, void *arg) {
     bufferevent_free(bev);
 }
 
+void handle_line(char* line, size_t numchars, struct bufferevent *bev)
+{
+    char method[255];
+    char url[255];
+    char path[512];
+    size_t i, j;
+    struct stat st;
+    int cgi = 0;      /* becomes true if server decides this is a CGI
+                       * program */
+    char *query_string = NULL;
+
+    // getline
+    char* buf = line;
+    i = 0; j = 0;
+    while (!ISspace(buf[i]) && (i < sizeof(method) - 1))
+    {
+        method[i] = buf[i];
+        i++;
+    }
+    j=i;
+    method[i] = '\0';
+
+    // cmp 都不是 0
+    if (strcasecmp(method, "GET") && strcasecmp(method, "POST"))
+    {
+        unimplemented(bev);
+        return;
+    }
+    printf("method is %s\n", method);
+    // 是 POST 方法，转发到 CGI
+    if (strcasecmp(method, "POST") == 0)
+        cgi = 1;
+
+    i = 0;
+    while (ISspace(buf[j]) && (j < numchars))
+        j++;
+    while (!ISspace(buf[j]) && (i < sizeof(url) - 1) && (j < numchars))
+    {
+        url[i] = buf[j];
+        i++; j++;
+    }
+    url[i] = '\0';
+
+    if (strcasecmp(method, "GET") == 0)
+    {
+        query_string = url;
+        while ((*query_string != '?') && (*query_string != '\0'))
+            query_string++;
+        if (*query_string == '?')
+        {
+            cgi = 1;
+            *query_string = '\0';
+            query_string++;
+        }
+    }
+
+    sprintf(path, "htdocs%s", url);
+    printf("path is %s, path[strlen(path) - 1] is %c\n", path, path[strlen(path) - 1]);
+    if (path[strlen(path) - 1] == '/') {
+        printf("return index.html\n");
+        strcat(path, "index.html");
+    }
+    if (stat(path, &st) == -1) {
+//        while ((numchars > 0) && strcmp("\n", buf))  {
+//            /* read & discard headers */
+//            // TODO: implement this
+//            unimplemented(bev);
+//            //            numchars = get_line(client, buf, sizeof(buf));
+//        }
+        printf("not found html file %s\n", path);
+        not_found(bev);
+    }
+    else
+    {
+        if ((st.st_mode & S_IFMT) == S_IFDIR)
+            strcat(path, "/index.html");
+        if ((st.st_mode & S_IXUSR) ||
+            (st.st_mode & S_IXGRP) ||
+            (st.st_mode & S_IXOTH)    )
+            cgi = 1;
+        if (!cgi) {
+            serve_file(bev, path);
+        }
+        else {
+            error_die("execute_cgi unimplemented");
+            unimplemented(bev);
+        }
+    }
+}
+
 void read_cb(struct bufferevent *bev, void *arg) {
-    struct evbuffer *buf = (struct evbuffer *)arg;
+    // evbuffer 给当成参数传进来了
+    struct evbuffer *buf = bufferevent_get_input(bev);
     char line[MAX_LINE+1];
     int n;
 
@@ -626,14 +576,15 @@ void read_cb(struct bufferevent *bev, void *arg) {
         //将读取到的内容放进缓冲区
         evbuffer_add(buf, line, n);
 
-        //搜索匹配缓冲区中是否有==，==号来分隔每次客户端的请求
-        const char *x = "\n";
-        // 搜索到了分割 ptr
-        struct evbuffer_ptr ptr = evbuffer_search(buf, x, strlen(x), 0);
-        if (ptr.pos != -1) {
-            // 原方案 拿到GET，然后拿到 path 和 query_string
-            // 最后发送文件
-            printf("has line\n");
-        }
+//        // 搜索到了分割 ptr
+//        char * rline = NULL;
+//        size_t len;
+//        rline = evbuffer_readln(buf, &len, EVBUFFER_EOL_ANY);
+//        if (rline != NULL) {
+//            printf("rline is %s\n", rline);
+//            handle_line(rline, len, bev);
+//        }
     }
+    handle_line(line, strlen(line), bev);
 }
+
