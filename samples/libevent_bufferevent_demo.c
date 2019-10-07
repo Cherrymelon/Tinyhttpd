@@ -54,8 +54,8 @@ void do_accept(evutil_socket_t fd, short event, void *arg) {
     struct event_base *base_ev = (struct event_base *) arg;
 
     //socket发送欢迎信息
-    char * msg = "Welcome to My socket";
-    int size = send(client_socketfd, msg, strlen(msg), 0);
+//    char * msg = "Welcome to My socket";
+//    int size = send(client_socketfd, msg, strlen(msg), 0);
 
     //创建一个事件，这个事件主要用于监听和读取客户端传递过来的数据
     //持久类型，并且将base_ev传递到do_read回调函数中去

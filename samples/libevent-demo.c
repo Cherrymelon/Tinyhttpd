@@ -59,7 +59,7 @@ void run_base_with_ticks(struct event_base *base)
 
     /* The caller has already set up fd1, fd2 somehow, and make them
    nonblocking. */
-    struct event *ev1, *ev2;
+    struct event *ev1;
     struct event *evs1;
 
     evutil_make_socket_nonblocking(STDIN_FILENO);

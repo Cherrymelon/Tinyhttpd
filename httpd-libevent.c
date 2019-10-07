@@ -1,3 +1,7 @@
+//
+// Created by 付旭炜 on 2019/10/7.
+//
+
 /* J. David's webserver */
 /* This is a simple webserver.
  * Created November 1999 by J. David Blackstone.
@@ -27,6 +31,11 @@
 #include <stdlib.h>
 #include <stdint.h>
 
+// libevent2
+#include <event2/event.h>
+#include <event2/bufferevent.h>
+#include <event2/buffer.h>
+
 #define ISspace(x) isspace((int)(x))
 
 #define SERVER_STRING "Server: jdbhttpd/0.1.0\r\n"
@@ -46,6 +55,9 @@ void not_found(int);
 void serve_file(int, const char *);
 int startup(u_short *);
 void unimplemented(int);
+void do_accept(evutil_socket_t fd, short event, void *arg);
+void read_cb(struct bufferevent *bev, void *arg);
+void error_cb(struct bufferevent *bev, short event, void *arg);
 
 /**********************************************************************/
 /* A request has caused a call to accept() on the server port to
@@ -102,7 +114,6 @@ void accept_request(void *arg)
         query_string = url;
         while ((*query_string != '?') && (*query_string != '\0'))
             query_string++;
-        // 处理 query_string
         if (*query_string == '?')
         {
             cgi = 1;
@@ -124,8 +135,8 @@ void accept_request(void *arg)
         if ((st.st_mode & S_IFMT) == S_IFDIR)
             strcat(path, "/index.html");
         if ((st.st_mode & S_IXUSR) ||
-                (st.st_mode & S_IXGRP) ||
-                (st.st_mode & S_IXOTH)    )
+            (st.st_mode & S_IXGRP) ||
+            (st.st_mode & S_IXOTH)    )
             cgi = 1;
         if (!cgi)
             serve_file(client, path);
@@ -213,7 +224,7 @@ void error_die(const char *sc)
  *             path to the CGI script */
 /**********************************************************************/
 void execute_cgi(int client, const char *path,
-        const char *method, const char *query_string)
+                 const char *method, const char *query_string)
 {
     char buf[1024];
     int cgi_output[2];
@@ -437,7 +448,6 @@ void serve_file(int client, const char *filename)
 int startup(u_short *port)
 {
     int httpd = 0;
-    int on = 1;
     struct sockaddr_in name;
 
     // Ipv4, tcp
@@ -452,10 +462,13 @@ int startup(u_short *port)
     // 这里是 sock 的一些属性设置
     // SOL_SOCKET 和 SO_REUSEADDR 是 Time-wait 有关的，在 time-wait 的时候仍然能处理
     // < 0 是处理失败了
-    if ((setsockopt(httpd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on))) < 0)  
-    {  
+    if (evutil_make_listen_socket_reuseable(httpd) < 0) {
         error_die("setsockopt failed");
     }
+    if (evutil_make_socket_nonblocking(httpd) < 0) {
+        error_die("set nonblocking failed"); //设置无阻赛
+    }
+
     // bind 在这个地址出问题
     if (bind(httpd, (struct sockaddr *)&name, sizeof(name)) < 0)
         error_die("bind");
@@ -508,33 +521,119 @@ int main(void)
     int server_sock = -1;
     // 端口选择
     u_short port = 4000;
+
+    server_sock = startup(&port);
+    printf("httpd running on port %d\n", port);
+
+    //创建event_base 事件的集合，多线程的话 每个线程都要初始化一个event_base
+    struct event_base *base_ev;
+    base_ev = event_base_new();
+    const char *x =  event_base_get_method(base_ev); //获取IO多路复用的模型，linux一般为epoll
+    printf("METHOD:%s\n", x);
+
+    struct event *ev;
+    ev = event_new(base_ev, server_sock, EV_TIMEOUT|EV_READ|EV_PERSIST, do_accept, base_ev);
+
+    //注册事件，使事件处于 pending的等待状态
+    event_add(ev, NULL);
+
+    //事件循环
+    event_base_dispatch(base_ev);
+
+//    while (1)
+//    {
+//        // 接受请求
+//        client_sock = accept(server_sock,
+//                             (struct sockaddr *)&client_name,
+//                             &client_name_len);
+//        if (client_sock == -1)
+//            error_die("accept");
+//        /* accept_request(&client_sock); */
+//        if (pthread_create(&newthread , NULL, (void *)accept_request, (void *)(intptr_t)client_sock) != 0)
+//            perror("pthread_create");
+//    }
+
+//    close(server_sock);
+
+    return(0);
+}
+
+//回调函数，用于监听连接进来的客户端socket
+void do_accept(evutil_socket_t server_sock, short event, void *arg) {
     // client_sock 处理客户端请求
     int client_sock = -1;
     // sockaddr_in 是客户端的结构
     struct sockaddr_in client_name;
     // sock_len
     socklen_t  client_name_len = sizeof(client_name);
-    // 新线程
-    pthread_t newthread;
 
+    client_sock = accept(server_sock,
+            (struct sockaddr *)&client_name, &client_name_len);
 
-    server_sock = startup(&port);
-    printf("httpd running on port %d\n", port);
-
-    while (1)
-    {
-        // 接受请求
-        client_sock = accept(server_sock,
-                (struct sockaddr *)&client_name,
-                &client_name_len);
-        if (client_sock == -1)
-            error_die("accept");
-        /* accept_request(&client_sock); */
-        if (pthread_create(&newthread , NULL, (void *)accept_request, (void *)(intptr_t)client_sock) != 0)
-            perror("pthread_create");
+    if (client_sock < 0) {
+        error_die("accpet error");
+        exit(1);
     }
 
-    close(server_sock);
+    //类型转换
+    struct event_base *base_ev = (struct event_base *) arg;
 
-    return(0);
+    //socket发送欢迎信息
+//    char * msg = "Welcome to My socket";
+//    int size = send(client_sock, msg, strlen(msg), 0);
+
+    //创建一个事件，这个事件主要用于监听和读取客户端传递过来的数据
+    //持久类型，并且将base_ev传递到do_read回调函数中去
+    //struct event *ev;
+    //ev = event_new(base_ev, client_socketfd, EV_TIMEOUT|EV_READ|EV_PERSIST, do_read, base_ev);
+    //event_add(ev, NULL);
+
+    //创建一个evbuffer，用来缓冲客户端传递过来的数据
+    struct evbuffer *buf = evbuffer_new();
+    //创建一个bufferevent
+    struct bufferevent *bev = bufferevent_socket_new(base_ev, client_sock, BEV_OPT_CLOSE_ON_FREE);
+    //设置读取方法和error时候的方法，将buf缓冲区当参数传递
+    bufferevent_setcb(bev, read_cb, NULL, error_cb, buf);
+    //设置类型
+    bufferevent_enable(bev, EV_READ|EV_WRITE|EV_PERSIST);
+    //设置水位
+    bufferevent_setwatermark(bev, EV_READ, 0, 0);
+}
+
+#define MAX_LINE    256
+
+void error_cb(struct bufferevent *bev, short event, void *arg) {
+    evutil_socket_t fd = bufferevent_getfd(bev);
+    printf("fd = %u, ", fd);
+    if (event & BEV_EVENT_TIMEOUT) {
+        printf("Timed out\n");
+    } else if (event & BEV_EVENT_EOF) {
+        printf("connection closed\n");
+    } else if (event & BEV_EVENT_ERROR) {
+        printf("some other error\n");
+    }
+    bufferevent_free(bev);
+}
+
+void read_cb(struct bufferevent *bev, void *arg) {
+    struct evbuffer *buf = (struct evbuffer *)arg;
+    char line[MAX_LINE+1];
+    int n;
+
+    while (n = bufferevent_read(bev, line, MAX_LINE), n > 0) {
+        line[n] = '\0';
+
+        //将读取到的内容放进缓冲区
+        evbuffer_add(buf, line, n);
+
+        //搜索匹配缓冲区中是否有==，==号来分隔每次客户端的请求
+        const char *x = "\n";
+        // 搜索到了分割 ptr
+        struct evbuffer_ptr ptr = evbuffer_search(buf, x, strlen(x), 0);
+        if (ptr.pos != -1) {
+            // 原方案 拿到GET，然后拿到 path 和 query_string
+            // 最后发送文件
+            printf("has line\n");
+        }
+    }
 }

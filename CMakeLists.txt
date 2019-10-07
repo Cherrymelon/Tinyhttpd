@@ -23,5 +23,9 @@ add_executable(httpd httpd.c)
 add_executable(httpd-select httpd-select.c)
 add_executable(httpd-fork httpd-fork.c)
 
+find_library(LIBEVENT2_CORE event_core)
+add_executable(httpd-libevent httpd-libevent.c)
+target_link_libraries(httpd-libevent ${LIBEVENT2_CORE})
+
 add_subdirectory(clients)
 add_subdirectory(samples)
